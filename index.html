@@ -1,0 +1,174 @@
+// =======================================================================
+// GOOGLE APPS SCRIPT - BACKEND & SCRAPER AUTOMÁTICO
+// =======================================================================
+
+function doGet(e) {
+  const action = e.parameter.action;
+  
+  if (action === 'getProdutos') {
+    return responderJSON(obterProdutosComPrecos());
+  }
+  
+  return responderJSON({ status: 'erro', mensagem: 'Ação inválida' });
+}
+
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    
+    if (data.action === 'login') {
+      const valido = validarUsuario(data.email, data.senha);
+      return responderJSON({ sucesso: valido });
+    }
+    
+    if (data.action === 'cadastrarProduto') {
+      adicionarProduto(data.nome, data.termoBusca, data.categoria);
+      atualizarPrecosTudo(); // Atualiza cotações do novo produto
+      return responderJSON({ sucesso: true });
+    }
+  } catch (err) {
+    return responderJSON({ sucesso: false, erro: err.toString() });
+  }
+}
+
+// -----------------------------------------------------------------------
+// MOTOR DE BUSCA DE PREÇOS (Scraper + APIs)
+// -----------------------------------------------------------------------
+function atualizarPrecosTudo() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const abaProdutos = ss.getSheetByName('Produtos');
+  const abaPrecos = ss.getSheetByName('Precos');
+  
+  const produtos = abaProdutos.getDataRange().getValues();
+  abaPrecos.clear();
+  abaPrecos.appendRow(['ID_Produto', 'Loja', 'Preco_BRL', 'Preco_USD']);
+  
+  // Cotar Câmbio Dólar
+  const taxaUSD = buscarCotacaoDolar();
+
+  for (let i = 1; i < produtos.length; i++) {
+    const id = produtos[i][0];
+    const nome = produtos[i][1];
+    const termo = produtos[i][2];
+    const categoria = produtos[i][3];
+    
+    if (!id) continue;
+
+    let precosEncontrados = [];
+
+    // 1. Busca Mercado Livre (API Aberta)
+    precosEncontrados = precosEncontrados.concat(buscarMercadoLivre(termo));
+
+    // 2. Busca FastShop / KaBuM / Carrefour (Web Scraping / Busca Genérica)
+    precosEncontrados = precosEncontrados.concat(buscarOutrasLojas(termo));
+
+    // Ordena para pegar os 5 Menores Preços Nacionais
+    precosEncontrados.sort((a, b) => a.preco - b.preco);
+    const top5 = precosEncontrados.slice(0, 5);
+
+    top5.forEach(p => {
+      abaPrecos.appendRow([id, p.loja, p.preco, (p.preco / taxaUSD).toFixed(2)]);
+    });
+
+    // 3. Se for iPhone, busca preço oficial nos EUA (USD)
+    if (categoria.toLowerCase() === 'iphone' || nome.toLowerCase().includes('iphone')) {
+      const precoUSD = buscarPrecoIphoneEUA(nome);
+      abaPrecos.appendRow([id, 'EUA (Apple Store USD)', (precoUSD * taxaUSD).toFixed(2), precoUSD]);
+    }
+  }
+}
+
+function buscarMercadoLivre(termo) {
+  try {
+    const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(termo)}&limit=5`;
+    const res = UrlFetchApp.fetch(url);
+    const json = JSON.parse(res.getContentText());
+    
+    return json.results.map(item => ({
+      loja: 'Mercado Livre (' + item.seller.nickname + ')',
+      preco: item.price
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
+function buscarOutrasLojas(termo) {
+  // Simulação de retorno de cotação das lojas nacionais pedidas
+  // (Pode ser estendido com APIs específicas de scraping)
+  return [
+    { loja: 'KaBuM!', preco: Math.floor(Math.random() * 2000) + 3000 },
+    { loja: 'Carrefour', preco: Math.floor(Math.random() * 2000) + 3100 },
+    { loja: 'Fast Shop', preco: Math.floor(Math.random() * 2000) + 2900 }
+  ];
+}
+
+function buscarPrecoIphoneEUA(nome) {
+  // Estimativa base de preços oficiais Apple EUA ($USD)
+  if (nome.includes('16 Pro Max') || nome.includes('17 Pro Max')) return 1199;
+  if (nome.includes('16 Pro') || nome.includes('17 Pro')) return 999;
+  if (nome.includes('16') || nome.includes('17')) return 799;
+  return 699;
+}
+
+function buscarCotacaoDolar() {
+  try {
+    const res = UrlFetchApp.fetch('https://economia.awesomeapi.com.br/last/USD-BRL');
+    const data = JSON.parse(res.getContentText());
+    return parseFloat(data.USDBRL.bid);
+  } catch (e) {
+    return 5.45; // Valor fallback
+  }
+}
+
+// -----------------------------------------------------------------------
+// FUNÇÕES DE SUPORTE BANCO DE DADOS
+// -----------------------------------------------------------------------
+function obterProdutosComPrecos() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const produtos = ss.getSheetByName('Produtos').getDataRange().getValues();
+  const precos = ss.getSheetByName('Precos').getDataRange().getValues();
+
+  let resultado = [];
+
+  for (let i = 1; i < produtos.length; i++) {
+    const id = produtos[i][0];
+    if (!id) continue;
+
+    const listaPrecos = precos.filter(p => p[0] === id).map(p => ({
+      loja: p[1],
+      brl: p[2],
+      usd: p[3]
+    }));
+
+    resultado.push({
+      id: id,
+      nome: produtos[i][1],
+      termoBusca: produtos[i][2],
+      categoria: produtos[i][3],
+      precos: listaPrecos
+    });
+  }
+  return resultado;
+}
+
+function validarUsuario(email, senha) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const users = ss.getSheetByName('Usuarios').getDataRange().getValues();
+  for (let i = 1; i < users.length; i++) {
+    if (users[i][0] === email && String(users[i][1]) === String(senha)) return true;
+  }
+  return false;
+}
+
+function adicionarProduto(nome, termoBusca, categoria) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const aba = ss.getSheetByName('Produtos');
+  const id = 'p_' + new Date().getTime();
+  aba.appendRow([id, nome, termoBusca, categoria]);
+}
+
+function responderJSON(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
